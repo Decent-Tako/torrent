@@ -118,10 +118,21 @@ func (t *Torrent) checkPendingPiecesMatchesRequestOrder() {
 		}
 		proBitmap.Add(uint32(item.Key.Index))
 	}
-	if !proBitmap.Equals(&t._pendingPieces.Bitmap) {
-		intersection := roaring.And(&proBitmap, &t._pendingPieces.Bitmap)
+	// A piece whose hash is not known yet is pending but is dropped from the
+	// request order by ignorePieceForRequests, the same legitimate divergence as
+	// dataDownloadDisallowed above. This is the normal state of a pure-v2 (BEP 52)
+	// torrent before its piece layers arrive: v2 piece hashes come from the piece
+	// layers, so Piece.haveHash is false for every piece until they do.
+	pending := t._pendingPieces.Bitmap.Clone()
+	for _, i := range pending.ToArray() {
+		if !t.piece(pieceIndex(i)).haveHash() {
+			pending.Remove(i)
+		}
+	}
+	if !proBitmap.Equals(pending) {
+		intersection := roaring.And(&proBitmap, pending)
 		exclPro := roaring.AndNot(&proBitmap, intersection)
-		exclPending := roaring.AndNot(&t._pendingPieces.Bitmap, intersection)
+		exclPending := roaring.AndNot(pending, intersection)
 		panic(fmt.Sprintf("piece request order has %v and pending pieces has %v", exclPro.String(), exclPending.String()))
 	}
 }

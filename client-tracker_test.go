@@ -1,18 +1,26 @@
 package torrent
 
 import (
+	"encoding/binary"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	qt "github.com/go-quicktest/qt"
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/require"
 
+	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/internal/testutil"
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/tracker"
 )
 
@@ -222,4 +230,119 @@ func startTestTracker() (*httptest.Server, string) {
 	s := httptest.NewServer(http.HandlerFunc(testtracker))
 	trackerUrl := "ws" + strings.TrimPrefix(s.URL, "http")
 	return s, trackerUrl
+}
+
+func TestTrackerDropAndReAddSameInfoHash(t *testing.T) {
+	seederDir, mi := testutil.GreetingTestTorrent()
+	defer os.RemoveAll(seederDir)
+
+	seederConfig := TestingConfig(t)
+	seederConfig.DataDir = seederDir
+	seederConfig.Seed = true
+	seeder, err := NewClient(seederConfig)
+	require.NoError(t, err)
+	defer seeder.Close()
+	seeded, err := seeder.AddTorrent(mi)
+	require.NoError(t, err)
+	require.NoError(t, seeded.VerifyData())
+	require.Eventually(t, seeded.Seeding, 5*time.Second, 10*time.Millisecond)
+
+	peer := compactPeerForTest(t, net.IPv4(127, 0, 0, 1), seeder.LocalPort())
+	var announces atomic.Int64
+	var startedAnnounces atomic.Int64
+	var stoppedAnnounces atomic.Int64
+	firstStoppedAnnounce := make(chan struct{})
+	releaseFirstStoppedAnnounce := make(chan struct{})
+	var releaseFirstStoppedAnnounceOnce sync.Once
+	releaseFirstStopped := func() {
+		releaseFirstStoppedAnnounceOnce.Do(func() {
+			close(releaseFirstStoppedAnnounce)
+		})
+	}
+	t.Cleanup(releaseFirstStopped)
+	testTracker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		announces.Add(1)
+		switch r.URL.Query().Get("event") {
+		case "started":
+			startedAnnounces.Add(1)
+		case "stopped":
+			if stoppedAnnounces.Add(1) == 1 {
+				close(firstStoppedAnnounce)
+				<-releaseFirstStoppedAnnounce
+			}
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		if err := bencode.NewEncoder(w).Encode(map[string]any{
+			"interval": 3600,
+			"peers":    peer,
+		}); err != nil {
+			t.Errorf("write tracker response: %v", err)
+		}
+	}))
+	defer testTracker.Close()
+
+	leecherConfig := TestingConfig(t)
+	leecherConfig.DisableTrackers = false
+	leecher, err := NewClient(leecherConfig)
+	require.NoError(t, err)
+	defer leecher.Close()
+
+	magnet := metainfo.Magnet{
+		InfoHash: mi.HashInfoBytes(),
+		Trackers: []string{testTracker.URL},
+	}.String()
+	first, err := leecher.AddMagnet(magnet)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return first.Info() != nil && first.Stats().ActivePeers == 1 && announces.Load() == 1
+	}, 5*time.Second, 10*time.Millisecond)
+
+	beforePeers := first.Stats().ActivePeers
+	announcesBeforeDrop := announces.Load()
+	first.Drop()
+	<-first.Closed()
+	<-firstStoppedAnnounce
+	first = nil
+	runtime.GC()
+	announcesAfterDrop := announces.Load()
+
+	readded, err := leecher.AddMagnet(magnet)
+	require.NoError(t, err)
+	releaseFirstStopped()
+	require.Eventually(t, func() bool {
+		return readded.Info() != nil && readded.Stats().ActivePeers == 1 &&
+			announces.Load() == 3 && startedAnnounces.Load() == 2
+	}, 5*time.Second, 10*time.Millisecond)
+	afterPeers := readded.Stats().ActivePeers
+	announcesAfterReAdd := announces.Load()
+	metadataResolved := readded.Info() != nil
+	t.Logf("before_peers=%d tracker_announces_before_drop=%d tracker_announces_after_drop=%d tracker_stopped_announces_after_drop=%d after_readd_peers=%d tracker_announces_after_readd=%d tracker_started_announces_after_readd=%d metadata_resolved=%t",
+		beforePeers, announcesBeforeDrop, announcesAfterDrop, stoppedAnnounces.Load(), afterPeers,
+		announcesAfterReAdd, startedAnnounces.Load(), metadataResolved)
+
+	var key torrentTrackerAnnouncerKey
+	for key = range readded.regularTrackerAnnounceState {
+		break
+	}
+	require.NotZero(t, key)
+	readded.Drop()
+	require.Eventually(t, func() bool {
+		leecher.lock()
+		defer leecher.unlock()
+		_, hasAnnounceState := leecher.regularTrackerAnnounceDispatcher.announceStates[key]
+		return announces.Load() == 4 && stoppedAnnounces.Load() == 2 &&
+			!leecher.regularTrackerAnnounceDispatcher.announceData.ContainsKey(key) && !hasAnnounceState
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func compactPeerForTest(t *testing.T, ip net.IP, port int) []byte {
+	t.Helper()
+	ip = ip.To4()
+	require.NotNil(t, ip)
+	require.Greater(t, port, 0)
+	require.LessOrEqual(t, port, 65535)
+	peer := make([]byte, 6)
+	copy(peer, ip)
+	binary.BigEndian.PutUint16(peer[4:], uint16(port))
+	return peer
 }

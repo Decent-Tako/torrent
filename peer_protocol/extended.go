@@ -21,6 +21,16 @@ type (
 		YourIp CompactIp `bencode:"yourip,omitempty"`
 		Ipv4   CompactIp `bencode:"ipv4,omitempty"`
 		Ipv6   net.IP    `bencode:"ipv6,omitempty"`
+		// Mariotte fork (BEP 21, Decent-Tako/Mariotte#147). BEP 21: "A peer
+		// that is a partial seed SHOULD include an extra header in the
+		// extension handshake (specified in BEP 0010), 'upload_only'. Setting
+		// the value of this key to 1 indicates that this peer is not
+		// interested in downloading anything."
+		//
+		// omitempty is required, not cosmetic: the key must be absent, not 0,
+		// when we are not a partial seed. This package does not decide the
+		// value.
+		UploadOnly bool `bencode:"upload_only,omitempty"`
 	}
 
 	ExtensionName   string

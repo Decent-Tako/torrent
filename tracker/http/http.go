@@ -43,8 +43,32 @@ func setAnnounceParams(_url *url.URL, ar *AnnounceRequest, opts AnnounceOpt) {
 	}
 	q.Set("left", strconv.FormatInt(left, 10))
 
-	if ar.Event != shared.None {
+	// Mariotte fork (BEP 21, Decent-Tako/Mariotte#147): the tracker half of
+	// BEP 21 is the EVENT, not a query flag. BEP 21, "Tracker Announce": "In
+	// order to tell the tracker that a peer is a partial seed, it MUST send an
+	// event=paused parameter in every announce while it is a partial seed."
+	//
+	// paused is deliberately absent from the shared.AnnounceEvent enum: BEP 3
+	// and BEP 15 define events 0..3 only, and the UDP body carries the event
+	// as an int32, so minting a fourth enum value would put an undefined event
+	// into every UDP announce. It is encoded here, on the HTTP path, where
+	// BEP 21 applies.
+	//
+	// A real "completed" or "stopped" event still wins: those report a
+	// one-time transition the tracker must not miss, and BEP 21 does not
+	// override them.
+	switch {
+	case ar.UploadOnly && (ar.Event == shared.None || ar.Event == shared.Started):
+		q.Set("event", "paused")
+	case ar.Event != shared.None:
 		q.Set("event", ar.Event.String())
+	}
+	// BEP 21 does not define upload_only as a tracker parameter — it is an
+	// extension-handshake key. It is sent here as well because it is
+	// widely-deployed de-facto behaviour and is harmless to a tracker that
+	// ignores unknown keys, while event=paused above is the normative half.
+	if ar.UploadOnly {
+		q.Set("upload_only", "1")
 	}
 	// http://stackoverflow.com/questions/17418004/why-does-tracker-server-not-understand-my-request-bittorrent-protocol
 	q.Set("compact", "1")

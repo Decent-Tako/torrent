@@ -2,6 +2,7 @@ package httpTracker
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 
 	qt "github.com/go-quicktest/qt"
@@ -70,6 +71,20 @@ func TestSetAnnounceInfohashParamWithSpaces(t *testing.T) {
 	qt.Check(t,
 		qt.StringContains(someUrl.String(),
 			"info_hash=%2Bv%0A%A1x%93%200%C8G%DC%DF%8E%AE%BFV%0A%1B%D1l"))
+}
+
+// BEP 21 / Decent-Tako/Mariotte#161: HTTP announce must carry upload_only=1
+// when the caller sets the field. This fails if the query param is dropped.
+func TestSetAnnounceUploadOnly(t *testing.T) {
+	on := &url.URL{}
+	setAnnounceParams(on, &udp.AnnounceRequest{UploadOnly: true}, AnnounceOpt{})
+	qt.Assert(t, qt.Equals(on.Query().Get("upload_only"), "1"))
+	qt.Assert(t, qt.Equals(strings.Contains(on.RawQuery, "upload_only=1"), true))
+
+	off := &url.URL{}
+	setAnnounceParams(off, &udp.AnnounceRequest{}, AnnounceOpt{})
+	qt.Assert(t, qt.Equals(off.Query().Get("upload_only"), ""))
+	qt.Assert(t, qt.Equals(strings.Contains(off.RawQuery, "upload_only"), false))
 }
 
 // These cases cover various forms of malformed non-compact peer lists that a

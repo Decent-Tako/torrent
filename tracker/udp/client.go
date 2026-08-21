@@ -37,7 +37,7 @@ func (cl *Client) Announce(
 	peers AnnounceResponsePeers,
 	err error,
 ) {
-	respBody, addr, err := cl.request(ctx, ActionAnnounce, append(mustMarshal(req), opts.Encode()...))
+	respBody, addr, err := cl.request(ctx, ActionAnnounce, encodeAnnounceBody(req, opts))
 	if err != nil {
 		return
 	}

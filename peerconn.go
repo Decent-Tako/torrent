@@ -1800,6 +1800,10 @@ func (cn *PeerConn) mustRequest(r RequestIndex) bool {
 }
 
 func (cn *PeerConn) request(r RequestIndex) (more bool, err error) {
+	req := cn.t.requestIndexToRequest(r)
+	if !cn.callbacks.allowChunkRequest(*cn.t.canonicalShortInfohash(), int(req.Index), int64(req.Begin)) {
+		return true, nil
+	}
 	if err := cn.shouldRequest(r); err != nil {
 		panic(err)
 	}

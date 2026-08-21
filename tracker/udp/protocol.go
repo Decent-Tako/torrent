@@ -73,10 +73,27 @@ func mustMarshal(data interface{}) []byte {
 }
 
 // This is for fixed-size, builtin types only I think.
+// AnnounceRequest is special-cased: UploadOnly is not in the 82-byte BEP 15
+// body (BEP 21 / Decent-Tako/Mariotte#161).
 func Write(w io.Writer, data interface{}) error {
-	return binary.Write(w, binary.BigEndian, data)
+	switch v := data.(type) {
+	case AnnounceRequest:
+		return binary.Write(w, binary.BigEndian, v.wire())
+	case *AnnounceRequest:
+		return binary.Write(w, binary.BigEndian, v.wire())
+	default:
+		return binary.Write(w, binary.BigEndian, data)
+	}
 }
 
 func Read(r io.Reader, data interface{}) error {
+	if ar, ok := data.(*AnnounceRequest); ok {
+		var wire announceRequestWire
+		if err := binary.Read(r, binary.BigEndian, &wire); err != nil {
+			return err
+		}
+		*ar = wire.toRequest()
+		return nil
+	}
 	return binary.Read(r, binary.BigEndian, data)
 }

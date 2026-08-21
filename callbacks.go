@@ -29,6 +29,9 @@ type Callbacks struct {
 	SentRequest        []func(PeerRequestEvent)
 	PeerClosed         []func(*Peer)
 	NewPeer            []func(*Peer)
+	// AllowChunkRequest is consulted before a REQUEST is selected or sent.
+	// Return false to skip this chunk. Nil means allow. The Client lock is held.
+	AllowChunkRequest func(ih InfoHash, piece int, offset int64) bool
 	// Called when a PeerConn has been added to a Torrent. It's finished all BitTorrent protocol
 	// handshakes, and is about to start sending and receiving BitTorrent messages. The extended
 	// handshake has not yet occurred. This is a good time to alter the supported extension
@@ -38,6 +41,13 @@ type Callbacks struct {
 	// Sends status event updates. Useful to inform the user of specific events as they happen,
 	// for logging or to action on.
 	StatusUpdated []func(StatusUpdatedEvent)
+}
+
+func (cb *Callbacks) allowChunkRequest(ih InfoHash, piece int, offset int64) bool {
+	if cb == nil || cb.AllowChunkRequest == nil {
+		return true
+	}
+	return cb.AllowChunkRequest(ih, piece, offset)
 }
 
 type ReceivedUsefulDataEvent = PeerMessageEvent

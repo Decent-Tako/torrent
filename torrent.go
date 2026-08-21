@@ -1060,12 +1060,30 @@ func (t *Torrent) bytesLeft() (left int64) {
 }
 
 // Bytes left to give in tracker announces.
+//
+// Mariotte fork (BEP 21, Decent-Tako/Mariotte#147): bytesLeft is derived from
+// _completedPieces, which the storage-backed completion overlay fills for
+// pieces whose only copy is in object storage. Announcing that as Left=0 tells
+// the tracker we are a full seed while we hold none of the bytes, and §17.1
+// forbids exactly that: "Do not use REMOTE_ONLY completion to force Left=0."
+//
+// AnnounceBytesLeft, when set, reports the bytes still not held as LOCAL
+// bytes. Only the announce uses it. Internal completion, request scheduling,
+// and the bitfield keep using bytesLeft, because for those purposes an
+// object-storage-backed piece really is available.
 func (t *Torrent) bytesLeftAnnounce() int64 {
-	if t.haveInfo() {
-		return t.bytesLeft()
-	} else {
+	if !t.haveInfo() {
 		return -1
 	}
+	if fn := t.cl.config.AnnounceBytesLeft; fn != nil {
+		ih := t.canonicalShortInfohash()
+		if ih != nil {
+			if left, ok := fn(*ih, t.length()); ok {
+				return left
+			}
+		}
+	}
+	return t.bytesLeft()
 }
 
 func (t *Torrent) piecePartiallyDownloaded(piece pieceIndex) bool {
@@ -2280,7 +2298,38 @@ func (t *Torrent) announceRequest(
 		Uploaded: t.connStats.BytesWrittenData.Int64(),
 		// There's no mention of wasted or unwanted download in the BEP.
 		Downloaded: t.connStats.BytesReadUsefulData.Int64(),
+
+		// Mariotte fork (BEP 21, Decent-Tako/Mariotte#147). Recomputed here on
+		// every announce rather than stored on the Torrent, so the claim can
+		// never outlive the condition. Left is untouched: a partial seed is
+		// still incomplete, and §17.1 forbids forcing Left=0.
+		UploadOnly: t.isPartialSeed(shortInfohash),
 	}
+}
+
+// isPartialSeed asks the Mariotte policy hook whether this torrent currently
+// wants nothing more (BEP 21). No hook means no claim.
+func (t *Torrent) isPartialSeed(shortInfohash [20]byte) bool {
+	fn := t.cl.config.IsPartialSeed
+	if fn == nil {
+		return false
+	}
+	return fn(shortInfohash)
+}
+
+// isPartialSeedCanonical is isPartialSeed for callers that have no announce
+// infohash to hand, such as the extension handshake. A pure-v2 torrent with no
+// info yet has no short infohash, so it makes no claim rather than
+// dereferencing nil (compare Decent-Tako/Mariotte#236).
+func (t *Torrent) isPartialSeedCanonical() bool {
+	if t.cl.config.IsPartialSeed == nil {
+		return false
+	}
+	ih := t.canonicalShortInfohash()
+	if ih == nil {
+		return false
+	}
+	return t.isPartialSeed(*ih)
 }
 
 // Adds peers revealed in an announce until the announce ends, or we have

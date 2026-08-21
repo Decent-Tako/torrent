@@ -282,6 +282,10 @@ func (p *PeerConn) getDesiredRequestState() (desired desiredRequestState) {
 					// Can't re-request while awaiting acknowledgement.
 					return
 				}
+				req := t.requestIndexToRequest(r)
+				if !p.callbacks.allowChunkRequest(*t.canonicalShortInfohash(), int(req.Index), int64(req.Begin)) {
+					return
+				}
 				requestHeap.requestIndexes = append(requestHeap.requestIndexes, r)
 			})
 			return true

@@ -232,6 +232,35 @@ type ClientConfig struct {
 	// Enable BEP-14 Local Service Discovery by setting this. A nil value
 	// leaves LPD disabled.
 	LocalServiceDiscovery *LocalServiceDiscoveryConfig
+
+	// Mariotte fork (BEP 21, Decent-Tako/Mariotte#147): reports whether the
+	// named torrent is a partial seed right now — incomplete, and wanting
+	// nothing more. When it returns true the tracker announce carries
+	// event=paused and the extension handshake carries upload_only=1.
+	//
+	// It is called fresh for every announce and every extension handshake,
+	// never cached: BEP 21 requires the state on "every announce while it is
+	// a partial seed", and a stale true would claim we want nothing while a
+	// correction is running.
+	//
+	// A nil value means no torrent is ever a partial seed, which is the
+	// truthful default for a client that has not been told otherwise. The
+	// policy itself lives in internal/partialseed, not here.
+	IsPartialSeed func(infoHash [20]byte) bool
+
+	// Mariotte fork (BEP 21, Decent-Tako/Mariotte#147): reports the bytes of
+	// this torrent NOT held as local bytes, for the tracker announce only.
+	//
+	// The default Left comes from the completed-pieces bitmap, which the
+	// storage-backed completion overlay fills for pieces parked in object
+	// storage. That would announce Left=0 — a full seed — while the node holds
+	// none of the bytes. §17.1 forbids using REMOTE_ONLY completion to force
+	// Left=0, so a partial seed reports what it actually holds.
+	//
+	// total is the torrent length, so an implementation that knows only the
+	// held byte count can subtract. Returning ok=false falls back to the
+	// library's own accounting. A nil value keeps stock behaviour.
+	AnnounceBytesLeft func(infoHash [20]byte, total int64) (left int64, ok bool)
 }
 
 func (cfg *ClientConfig) SetListenAddr(addr string) *ClientConfig {
