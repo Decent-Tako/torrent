@@ -48,4 +48,8 @@ func (me *TorrentGauges) Add(agg TorrentGauges) {
 
 type TorrentStatCounters struct {
 	BytesHashed Count
+	// Mariotte fork (issue #295). Exact counts of expected peer-request read
+	// failures (cold-piece refusals) and of those whose Warning was suppressed.
+	ExpectedPeerRequestObserved   Count
+	ExpectedPeerRequestSuppressed Count
 }

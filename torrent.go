@@ -71,6 +71,10 @@ type Torrent struct {
 	connStats AllConnStats
 	counters  TorrentStatCounters
 
+	// Mariotte fork (issue #295). Rate-limits expected peer-request read
+	// failure warnings per torrent, not per piece.
+	expectedPeerRequestFailures expectedPeerRequestLimiter
+
 	cl     *Client
 	logger log.Logger
 

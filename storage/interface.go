@@ -100,3 +100,13 @@ type PieceReader interface {
 type PeerServePieceReaderAt interface {
 	ReadAtPeerServe(b []byte, off int64) (int, error)
 }
+
+// ExpectedPeerRequestFailure is an optional error capability: a peer-serve
+// read may fail in an expected way (for example a cold-piece refusal).
+//
+// Mariotte fork (issue #295). The torrent client rate-limits Warning logs for
+// these failures per torrent. Distinct-piece floods cannot each emit a first
+// warning. Errors that do not implement it keep the default immediate Warning.
+type ExpectedPeerRequestFailure interface {
+	ExpectedPeerRequestFailure()
+}

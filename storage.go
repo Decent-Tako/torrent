@@ -102,6 +102,19 @@ type PeerServeReaderAt interface {
 	ReadAtPeerServe(b []byte, off int64) (int, error)
 }
 
+// ExpectedPeerRequestFailure is an optional error capability: a storage
+// backend may mark a peer-request read failure as expected (for example a
+// cold-piece refusal).
+//
+// Mariotte fork (issue #295). peerRequestDataReadFailed rate-limits Warning
+// logs for these failures per torrent, so a distinct-piece flood cannot emit
+// one warning per piece. Errors that do not implement it keep the default
+// immediate Warning. The torrent fork does not import Mariotte store code;
+// a backend implements the method on its error value.
+type ExpectedPeerRequestFailure interface {
+	ExpectedPeerRequestFailure()
+}
+
 // readAtForPeerServe reads through PeerServeReaderAt when the storage backend
 // offers it, and falls back to the plain ReadAt contract otherwise.
 func readAtForPeerServe(r storageReader, b []byte, off int64) (int, error) {
