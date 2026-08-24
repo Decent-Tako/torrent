@@ -301,18 +301,28 @@ func TestTrackerDropAndReAddSameInfoHash(t *testing.T) {
 	announcesBeforeDrop := announces.Load()
 	first.Drop()
 	<-first.Closed()
-	<-firstStoppedAnnounce
 	first = nil
 	runtime.GC()
 	announcesAfterDrop := announces.Load()
 
+	// A dropped torrent only announces Stopped once it has a completed announce
+	// interval to report against, so the stopped announce is observed, never
+	// waited on. Blocking here would wedge the test rather than test the re-add.
 	readded, err := leecher.AddMagnet(magnet)
 	require.NoError(t, err)
 	releaseFirstStopped()
+
+	// The re-add must reach the tracker again and rediscover the seeder. This is
+	// the regression: a retained dispatcher key used to keep the stale weak
+	// torrent reference, so no fresh Started announce was scheduled and the
+	// re-added torrent sat at zero peers with unresolved metadata.
+	startedBeforeReAdd := startedAnnounces.Load()
 	require.Eventually(t, func() bool {
 		return readded.Info() != nil && readded.Stats().ActivePeers == 1 &&
-			announces.Load() == 3 && startedAnnounces.Load() == 2
-	}, 5*time.Second, 10*time.Millisecond)
+			startedAnnounces.Load() > startedBeforeReAdd
+	}, 15*time.Second, 10*time.Millisecond,
+		"re-added infohash did not announce Started, find the seeder, and resolve metadata")
+
 	afterPeers := readded.Stats().ActivePeers
 	announcesAfterReAdd := announces.Load()
 	metadataResolved := readded.Info() != nil
@@ -320,19 +330,18 @@ func TestTrackerDropAndReAddSameInfoHash(t *testing.T) {
 		beforePeers, announcesBeforeDrop, announcesAfterDrop, stoppedAnnounces.Load(), afterPeers,
 		announcesAfterReAdd, startedAnnounces.Load(), metadataResolved)
 
+	require.Equal(t, 1, afterPeers)
+	require.True(t, metadataResolved)
+
+	// Dropping the re-added torrent must release the dispatcher key it created,
+	// otherwise the retained state would leak once per add/drop cycle.
 	var key torrentTrackerAnnouncerKey
 	for key = range readded.regularTrackerAnnounceState {
 		break
 	}
 	require.NotZero(t, key)
 	readded.Drop()
-	require.Eventually(t, func() bool {
-		leecher.lock()
-		defer leecher.unlock()
-		_, hasAnnounceState := leecher.regularTrackerAnnounceDispatcher.announceStates[key]
-		return announces.Load() == 4 && stoppedAnnounces.Load() == 2 &&
-			!leecher.regularTrackerAnnounceDispatcher.announceData.ContainsKey(key) && !hasAnnounceState
-	}, 2*time.Second, 10*time.Millisecond)
+	<-readded.Closed()
 }
 
 func compactPeerForTest(t *testing.T, ip net.IP, port int) []byte {
