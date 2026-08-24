@@ -134,6 +134,13 @@ func (p Piece) NewReader() (PieceReader, error) {
 	if ok {
 		return pr.NewReader()
 	}
+	// Mariotte fork (#260): when the backing PieceImpl can distinguish a
+	// peer-facing read, keep that capability visible through the default
+	// wrapper. Without this the marker is lost for every backend that does not
+	// implement PieceReaderer, which includes Mariotte's own store.
+	if ps, ok := p.PieceImpl.(PeerServePieceReaderAt); ok {
+		return peerServeNopCloser{ReaderAt: p, PeerServePieceReaderAt: ps}, nil
+	}
 	// TODO: Make generic reflect wrapper for nop Closer.
 	return struct {
 		io.ReaderAt
@@ -148,4 +155,13 @@ type nopCloser struct{}
 
 func (nopCloser) Close() error {
 	return nil
+}
+
+// peerServeNopCloser is the default PieceReader wrapper for a PieceImpl that
+// can distinguish peer-facing reads (Mariotte fork, #260). It forwards both the
+// plain ReadAt contract and the peer-serve one.
+type peerServeNopCloser struct {
+	io.ReaderAt
+	PeerServePieceReaderAt
+	nopCloser
 }
