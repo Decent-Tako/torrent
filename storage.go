@@ -47,6 +47,16 @@ func (me *storagePieceReader) getReaderAt(p Piece) (err error) {
 }
 
 func (me *storagePieceReader) ReadAt(b []byte, off int64) (n int, err error) {
+	return me.readAt(b, off, false)
+}
+
+// ReadAtPeerServe implements PeerServeReaderAt: the bytes are destined for a
+// remote peer, so a backend may refuse rather than fetch them inline (#260).
+func (me *storagePieceReader) ReadAtPeerServe(b []byte, off int64) (n int, err error) {
+	return me.readAt(b, off, true)
+}
+
+func (me *storagePieceReader) readAt(b []byte, off int64, peerServe bool) (n int, err error) {
 	for len(b) != 0 {
 		p := me.t.pieceForOffset(off)
 		p.waitNoPendingWrites()
@@ -55,7 +65,11 @@ func (me *storagePieceReader) ReadAt(b []byte, off int64) (n int, err error) {
 		if err != nil {
 			return
 		}
-		n1, err = me.pr.ReadAt(b, off-p.Info().Offset())
+		if ps, ok := me.pr.(storage.PeerServePieceReaderAt); ok && peerServe {
+			n1, err = ps.ReadAtPeerServe(b, off-p.Info().Offset())
+		} else {
+			n1, err = me.pr.ReadAt(b, off-p.Info().Offset())
+		}
 		if n1 == 0 {
 			panicif.Nil(err)
 			break
@@ -70,6 +84,31 @@ func (me *storagePieceReader) ReadAt(b []byte, off int64) (n int, err error) {
 type storageReader interface {
 	io.ReaderAt
 	io.Closer
+}
+
+// PeerServeReaderAt is an optional storage capability: read bytes that are
+// about to be sent to a remote peer, as opposed to a local reader.
+//
+// Mariotte fork (issue #260). A storage backend whose bytes may live remotely
+// needs to tell the two apart. A local reader wants the bytes and can afford to
+// wait for them; a peer request must not block the serving goroutine on a
+// remote fetch, because that serialises every peer read against link latency.
+// A backend implementing this may refuse a peer read that it could only satisfy
+// by fetching, and start that fetch in the background instead. The refusal
+// becomes a normal BitTorrent REJECT.
+//
+// Backends that do not implement it are read through ReadAt exactly as before.
+type PeerServeReaderAt interface {
+	ReadAtPeerServe(b []byte, off int64) (int, error)
+}
+
+// readAtForPeerServe reads through PeerServeReaderAt when the storage backend
+// offers it, and falls back to the plain ReadAt contract otherwise.
+func readAtForPeerServe(r storageReader, b []byte, off int64) (int, error) {
+	if ps, ok := r.(PeerServeReaderAt); ok {
+		return ps.ReadAtPeerServe(b, off)
+	}
+	return r.ReadAt(b, off)
 }
 
 // This wraps a storage impl provided TorrentReader as a storageReader.

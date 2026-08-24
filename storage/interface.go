@@ -87,3 +87,16 @@ type PieceReader interface {
 	io.ReaderAt
 	io.Closer
 }
+
+// PeerServePieceReaderAt is an optional PieceReader capability: read bytes that
+// are about to be sent to a remote peer rather than to a local reader.
+//
+// Mariotte fork (issue #260). A backend whose bytes may live in remote storage
+// must not block the serving goroutine fetching them back, because that
+// serialises every peer read against the storage link's latency. Implementers
+// may refuse such a read and fetch in the background instead; the client turns
+// the error into a BitTorrent REJECT. Local reads keep the plain ReadAt
+// contract and may still fetch inline.
+type PeerServePieceReaderAt interface {
+	ReadAtPeerServe(b []byte, off int64) (int, error)
+}

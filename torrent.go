@@ -1863,9 +1863,15 @@ func (t *Torrent) afterSetPieceCompletion(piece pieceIndex, changed bool) {
 }
 
 // Non-blocking read. Client lock is not required.
+//
+// This is the peer-serve read: the only caller is readPeerRequestData, which
+// fills a REQUEST from a remote peer. Mariotte fork (#260): it reads through
+// PeerServeReaderAt when the storage backend offers it, so a backend holding
+// the bytes remotely can refuse rather than fetch inline and block this
+// goroutine. The refusal becomes a REJECT via peerRequestDataReadFailed.
 func (t *Torrent) readAt(b []byte, off int64) (n int, err error) {
 	r := t.storageReader()
-	n, err = r.ReadAt(b, off)
+	n, err = readAtForPeerServe(r, b, off)
 	panicif.Err(r.Close())
 	return
 }
