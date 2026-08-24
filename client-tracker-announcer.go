@@ -593,7 +593,14 @@ func (me *regularTrackerAnnounceDispatcher) updateTorrentInput(t *Torrent) {
 				return av
 			},
 		)
-		panicif.False(res.Exists)
+		if !res.Exists {
+			// syncAnnounceState deletes the announce record once no event
+			// remains, but the torrent keeps the key in its own map. A pending
+			// input update that lands after that deletion has nothing to update,
+			// which is expected rather than a logic fault. Panicking here would
+			// take down the whole client on an ordinary drop/re-add race (#38).
+			delete(t.regularTrackerAnnounceState, key)
+		}
 	}
 }
 
