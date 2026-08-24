@@ -823,15 +823,7 @@ func (c *PeerConn) servePeerRequest(r Request) {
 // chunk sending, the way it used to work.
 func (c *PeerConn) peerRequestDataReadFailed(err error, r Request) {
 	torrent.Add("peer request data read failures", 1)
-	logLevel := log.Warning
-	if c.t.hasStorageCap() || c.t.closed.IsSet() {
-		// It's expected that pieces might drop. See
-		// https://github.com/anacrolix/torrent/issues/702#issuecomment-1000953313. Also the torrent
-		// may have been Dropped, and the user expects to own the files, see
-		// https://github.com/anacrolix/torrent/issues/980.
-		logLevel = log.Debug
-	}
-	c.logger.Levelf(logLevel, "error reading chunk for peer Request %v: %v", r, err)
+	c.logPeerRequestDataReadFailed(err, r)
 	if c.t.closed.IsSet() {
 		c.deletePeerRequest(r)
 		return
