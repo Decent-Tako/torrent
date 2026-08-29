@@ -52,3 +52,61 @@ func TestUpdateOverdueRecursion(t *testing.T) {
 		d.updateOverdue()
 	})
 }
+
+// A dropped torrent can remain in pendingTorrentInputUpdates after a replacement
+// with the same infohash has installed fresh announce data. The stale update must
+// not replace the new torrent input, or the replacement will never announce Started.
+func TestDroppedTorrentInputDoesNotOverwriteReAddedTorrent(t *testing.T) {
+	var infoHash shortInfohash
+	infoHash[0] = 1
+	urlKey := trackerAnnouncerKey("http://tracker.invalid/announce")
+	announceKey := torrentTrackerAnnouncerKey{
+		ShortInfohash: infoHash,
+		url:           urlKey,
+	}
+
+	cl := &Client{
+		config:              NewDefaultClientConfig(),
+		torrents:            make(map[*Torrent]struct{}),
+		torrentsByShortHash: make(map[InfoHash]*Torrent),
+	}
+	old := &Torrent{
+		cl:                          cl,
+		regularTrackerAnnounceState: make(map[torrentTrackerAnnouncerKey]*announceState),
+	}
+	readded := &Torrent{
+		cl:                          cl,
+		regularTrackerAnnounceState: make(map[torrentTrackerAnnouncerKey]*announceState),
+	}
+	cl.torrents[readded] = struct{}{}
+	cl.torrentsByShortHash[infoHash] = readded
+
+	d := &cl.regularTrackerAnnounceDispatcher
+	d.torrentClient = cl
+	d.logger = slog.Default()
+	d.initTables()
+	d.initTimerNoop()
+	d.trackerClients = map[trackerAnnouncerKey]*trackerClientsValue{
+		urlKey: {},
+	}
+	state := &announceState{}
+	d.announceStates = map[torrentTrackerAnnouncerKey]*announceState{
+		announceKey: state,
+	}
+	old.regularTrackerAnnounceState[announceKey] = state
+	readded.regularTrackerAnnounceState[announceKey] = state
+
+	panicif.False(d.announceData.Create(announceKey, nextAnnounceInput{
+		torrent:                d.makeTorrentInput(readded),
+		nextAnnounceStateInput: d.makeAnnounceStateInput(announceKey),
+	}))
+	want, ok := d.announceData.Get(announceKey)
+	qt.Assert(t, qt.IsTrue(ok))
+	qt.Assert(t, qt.IsTrue(want.torrent.Ok))
+
+	d.updateTorrentInput(old)
+
+	got, ok := d.announceData.Get(announceKey)
+	qt.Assert(t, qt.IsTrue(ok))
+	qt.Assert(t, qt.Equals(got, want))
+}

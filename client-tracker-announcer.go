@@ -583,6 +583,15 @@ func (me *regularTrackerAnnounceDispatcher) updateTorrentInput(t *Torrent) {
 	for key := range t.regularTrackerAnnounceState {
 		panicif.Zero(key.url)
 		panicif.Zero(key.ShortInfohash)
+		// Drop queues an input update after removing the torrent from the
+		// client's infohash map. If the same infohash is re-added before the
+		// dispatcher consumes that update, addKey has already rebound this
+		// shared announce key to the replacement. Do not let the stale dropped
+		// torrent overwrite the replacement's input with None.
+		if current := me.torrentFromShortInfohash(key.ShortInfohash); current != nil && current != t {
+			delete(t.regularTrackerAnnounceState, key)
+			continue
+		}
 		// Avoid clobbering derived and unrelated values (overdue and active).
 		res := me.announceData.Update(
 			key,
