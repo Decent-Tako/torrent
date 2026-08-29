@@ -98,7 +98,8 @@ type Client struct {
 
 	// Piece request orderings grouped by storage. Value is value type because all fields are
 	// references.
-	pieceRequestOrder map[clientPieceRequestOrderKeySumType]clientPieceRequestOrderValue
+	pieceRequestOrder       map[clientPieceRequestOrderKeySumType]clientPieceRequestOrderValue
+	requestOrderWakePending map[clientPieceRequestOrderKeySumType]struct{}
 
 	acceptLimiter map[ipStr]int
 	numHalfOpen   int

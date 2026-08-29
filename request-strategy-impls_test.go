@@ -5,7 +5,9 @@ import (
 	"io"
 	"runtime"
 	"testing"
+	"time"
 
+	"github.com/RoaringBitmap/roaring/v2"
 	g "github.com/anacrolix/generics"
 	"github.com/anacrolix/missinggo/v2/iter"
 	"github.com/go-quicktest/qt"
@@ -93,6 +95,39 @@ type sharedCompletionStorage struct {
 	capacity storage.TorrentCapacity
 }
 
+type countingWakePeer struct {
+	want      int
+	lowChecks int
+	wakes     int
+	done      chan struct{}
+	pieces    roaring.Bitmap
+}
+
+func (p *countingWakePeer) isLowOnRequests() bool {
+	p.lowChecks++
+	return true
+}
+
+func (p *countingWakePeer) onNeedUpdateRequests(updateRequestReason) {
+	p.wakes++
+	if p.wakes == p.want {
+		close(p.done)
+	}
+}
+
+func (*countingWakePeer) handleCancel(RequestIndex)      {}
+func (*countingWakePeer) cancelAllRequests()             {}
+func (*countingWakePeer) connectionFlags() string        { return "" }
+func (*countingWakePeer) onClose()                       {}
+func (*countingWakePeer) onGotInfo(*metainfo.Info)       {}
+func (*countingWakePeer) drop()                          {}
+func (*countingWakePeer) providedBadData()               {}
+func (*countingWakePeer) String() string                 { return "counting-wake-peer" }
+func (*countingWakePeer) peerImplStatusLines() []string  { return nil }
+func (*countingWakePeer) peerImplWriteStatus(io.Writer)  {}
+func (*countingWakePeer) peerHasAllPieces() (bool, bool) { return false, false }
+func (p *countingWakePeer) peerPieces() *roaring.Bitmap  { return &p.pieces }
+
 func (s sharedCompletionStorage) OpenTorrent(
 	context.Context,
 	*metainfo.Info,
@@ -143,9 +178,87 @@ func TestPieceCompletionWakesIdlePeerSharingRequestOrder(t *testing.T) {
 	cl.lock()
 	complete = true
 	qt.Assert(t, qt.IsTrue(first.updatePieceCompletion(0)))
-	qt.Check(t, qt.Equals(peer.needRequestUpdate, updateRequestReason("Torrent.updatePieceCompletion")))
+	cl.unlock()
+
+	wantReason := updateRequestReason("Torrent.updatePieceCompletion")
+	deadline := time.Now().Add(time.Second)
+	for {
+		cl.rLock()
+		gotReason := peer.needRequestUpdate
+		cl.rUnlock()
+		if gotReason == wantReason {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("peer request-update reason = %q, want %q", gotReason, wantReason)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cl.lock()
 	delete(second.conns, &peer)
 	cl.unlock()
+}
+
+func TestRequestOrderWakeCoalescesRestoredCorpusBurst(t *testing.T) {
+	cl := newTestingClient(t)
+	complete := false
+	capacityFn := func() (int64, bool) { return 1 << 20, true }
+	storageClient := sharedCompletionStorage{
+		complete: &complete,
+		capacity: &capacityFn,
+	}
+	first, _ := cl.AddTorrentOpt(AddTorrentOpts{
+		InfoHash:                 metainfo.Hash{1},
+		Storage:                  storageClient,
+		DisableInitialPieceCheck: true,
+	})
+	second, _ := cl.AddTorrentOpt(AddTorrentOpts{
+		InfoHash:                 metainfo.Hash{2},
+		Storage:                  storageClient,
+		DisableInitialPieceCheck: true,
+	})
+	info := &metainfo.Info{
+		Name:        "restored-corpus-wake",
+		Length:      32,
+		PieceLength: 1,
+		Pieces:      make([]byte, 32*metainfo.HashSize),
+	}
+	qt.Assert(t, qt.IsNil(first.setInfoUnlocked(info)))
+	qt.Assert(t, qt.IsNil(second.setInfoUnlocked(info)))
+
+	const peerCount = 132
+	counter := &countingWakePeer{
+		want: peerCount,
+		done: make(chan struct{}),
+	}
+	peers := make([]*PeerConn, 0, peerCount)
+	for range peerCount {
+		peer := &PeerConn{Peer: Peer{cl: cl, t: second}}
+		peer.legacyPeerImpl = counter
+		second.conns[peer] = struct{}{}
+		peers = append(peers, peer)
+	}
+
+	cl.lock()
+	complete = true
+	for piece := range 32 {
+		first.setInitialPieceCompletionFromStorage(piece)
+	}
+	cl.unlock()
+
+	select {
+	case <-counter.done:
+	case <-time.After(time.Second):
+		t.Fatal("shared request-order peers were not woken")
+	}
+
+	cl.lock()
+	for _, peer := range peers {
+		delete(second.conns, peer)
+	}
+	lowChecks := counter.lowChecks
+	cl.unlock()
+	qt.Check(t, qt.Equals(lowChecks, peerCount))
 }
 
 type storageClient struct {

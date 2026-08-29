@@ -1704,22 +1704,47 @@ func (t *Torrent) pendRequest(req RequestIndex) {
 
 func (t *Torrent) pieceCompletionChanged(piece pieceIndex, reason updateRequestReason) {
 	t.cl.event.Broadcast()
-	if t.pieceComplete(piece) {
+	completed := t.pieceComplete(piece)
+	if completed {
 		t.onPieceCompleted(piece)
 	} else {
 		t.onIncompletePiece(piece)
 	}
 	t.updatePiecePriority(piece, reason)
-	// A completed piece no longer consumes the client-wide unverified-byte
-	// window. Its own pending bit is already gone, so the piece-scoped update
-	// above deliberately skips every peer. Wake idle peers across the shared
-	// request order so they can spend the newly available budget.
-	t.updateLowPeersForRequestOrder(reason)
+	if completed {
+		// A completed piece no longer consumes the client-wide unverified-byte
+		// window. Its own pending bit is already gone, so the piece-scoped update
+		// above deliberately skips every peer. Wake idle peers across the shared
+		// request order so they can spend the newly available budget.
+		t.updateLowPeersForRequestOrder(reason)
+	}
 }
 
+// updateLowPeersForRequestOrder schedules one wake for a burst of completions
+// that share a request order. Piece completion runs under the client lock.
+// Scanning every torrent and peer inline for every restored piece made startup
+// and read-only snapshots contend on that lock for minutes on a large corpus.
 func (t *Torrent) updateLowPeersForRequestOrder(reason updateRequestReason) {
 	key := t.clientPieceRequestOrderKey()
-	for candidate := range t.cl.torrents {
+	cl := t.cl
+	if cl.requestOrderWakePending == nil {
+		cl.requestOrderWakePending = make(map[clientPieceRequestOrderKeySumType]struct{})
+	}
+	if _, pending := cl.requestOrderWakePending[key]; pending {
+		return
+	}
+	cl.requestOrderWakePending[key] = struct{}{}
+	go cl.wakeLowPeersForRequestOrder(key, reason)
+}
+
+func (cl *Client) wakeLowPeersForRequestOrder(
+	key clientPieceRequestOrderKeySumType,
+	reason updateRequestReason,
+) {
+	cl.lock()
+	defer cl.unlock()
+	delete(cl.requestOrderWakePending, key)
+	for candidate := range cl.torrents {
 		if candidate.storage == nil || candidate.clientPieceRequestOrderKey() != key {
 			continue
 		}
