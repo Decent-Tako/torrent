@@ -96,14 +96,23 @@ type sharedCompletionStorage struct {
 }
 
 type countingWakePeer struct {
-	want      int
-	lowChecks int
-	wakes     int
-	done      chan struct{}
-	pieces    roaring.Bitmap
+	want        int
+	lowChecks   int
+	wakes       int
+	done        chan struct{}
+	pieces      roaring.Bitmap
+	scanStarted chan struct{}
+	releaseScan <-chan struct{}
 }
 
 func (p *countingWakePeer) isLowOnRequests() bool {
+	if p.scanStarted != nil {
+		select {
+		case p.scanStarted <- struct{}{}:
+		default:
+		}
+		<-p.releaseScan
+	}
 	p.lowChecks++
 	return true
 }
@@ -199,6 +208,119 @@ func TestPieceCompletionWakesIdlePeerSharingRequestOrder(t *testing.T) {
 	cl.unlock()
 }
 
+func TestRequestOrderWakeDoesNotHoldStatsLockAfterRestoredCorpusReady(t *testing.T) {
+	cl := newTestingClient(t)
+	complete := false
+	capacityFn := func() (int64, bool) { return 1 << 20, true }
+	storageClient := sharedCompletionStorage{
+		complete: &complete,
+		capacity: &capacityFn,
+	}
+	first, _ := cl.AddTorrentOpt(AddTorrentOpts{
+		InfoHash:                 metainfo.Hash{1},
+		Storage:                  storageClient,
+		DisableInitialPieceCheck: true,
+	})
+	info := &metainfo.Info{
+		Name:        "restored-corpus-stats-lock",
+		Length:      32,
+		PieceLength: 1,
+		Pieces:      make([]byte, 32*metainfo.HashSize),
+	}
+	qt.Assert(t, qt.IsNil(first.setInfoUnlocked(info)))
+
+	const torrentCount = 128
+	var peerTorrent *Torrent
+	for i := 1; i < torrentCount; i++ {
+		candidate, _ := cl.AddTorrentOpt(AddTorrentOpts{
+			InfoHash:                 metainfo.Hash{2, byte(i)},
+			Storage:                  storageClient,
+			DisableInitialPieceCheck: true,
+		})
+		qt.Assert(t, qt.IsNil(candidate.setInfoUnlocked(info)))
+		peerTorrent = candidate
+	}
+
+	scanStarted := make(chan struct{}, 1)
+	releaseScan := make(chan struct{})
+	counter := &countingWakePeer{
+		want:        1,
+		done:        make(chan struct{}),
+		scanStarted: scanStarted,
+		releaseScan: releaseScan,
+	}
+	peer := &PeerConn{Peer: Peer{cl: cl, t: peerTorrent}}
+	peer.legacyPeerImpl = counter
+	peerTorrent.conns[peer] = struct{}{}
+	defer func() {
+		cl.lock()
+		delete(peerTorrent.conns, peer)
+		cl.unlock()
+	}()
+
+	cl.lock()
+	complete = true
+	for piece := range 32 {
+		first.setInitialPieceCompletionFromStorage(piece)
+	}
+	cl.unlock()
+
+	select {
+	case <-scanStarted:
+		statsDone := make(chan struct{})
+		go func() {
+			first.Stats()
+			close(statsDone)
+		}()
+		select {
+		case <-statsDone:
+			close(releaseScan)
+		case <-time.After(100 * time.Millisecond):
+			close(releaseScan)
+			<-statsDone
+			t.Fatal("Stats waited behind a restored-corpus request-order wake holding the client lock")
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(releaseScan)
+	}
+
+	cl.lock()
+	complete = false
+	for piece := range 8 {
+		first.updatePieceCompletion(piece)
+	}
+	complete = true
+	for piece := range 8 {
+		first.updatePieceCompletion(piece)
+	}
+	cl.unlock()
+
+	for measurement := range 3 {
+		statsDone := make(chan struct{})
+		go func() {
+			first.Stats()
+			close(statsDone)
+		}()
+		select {
+		case <-statsDone:
+		case <-time.After(250 * time.Millisecond):
+			t.Fatalf("Stats measurement %d waited behind request-order wake", measurement+1)
+		}
+	}
+	select {
+	case <-counter.done:
+	case <-time.After(time.Second):
+		t.Fatal("live completion did not wake the shared-order peer")
+	}
+
+	cl.lock()
+	lowChecks := counter.lowChecks
+	wakes := counter.wakes
+	cl.unlock()
+	qt.Check(t, qt.Equals(lowChecks, 1))
+	qt.Check(t, qt.Equals(wakes, 1))
+}
+
 func TestRequestOrderWakeCoalescesRestoredCorpusBurst(t *testing.T) {
 	cl := newTestingClient(t)
 	complete := false
@@ -244,7 +366,7 @@ func TestRequestOrderWakeCoalescesRestoredCorpusBurst(t *testing.T) {
 	cl.lock()
 	complete = true
 	for piece := range 32 {
-		first.setInitialPieceCompletionFromStorage(piece)
+		first.updatePieceCompletion(piece)
 	}
 	cl.unlock()
 

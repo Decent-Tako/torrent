@@ -1702,7 +1702,11 @@ func (t *Torrent) pendRequest(req RequestIndex) {
 	t.piece(t.pieceIndexOfRequestIndex(req)).pendChunkIndex(req % t.chunksPerRegularPiece())
 }
 
-func (t *Torrent) pieceCompletionChanged(piece pieceIndex, reason updateRequestReason) {
+func (t *Torrent) pieceCompletionChanged(
+	piece pieceIndex,
+	reason updateRequestReason,
+	wakeSharedRequestOrder bool,
+) {
 	t.cl.event.Broadcast()
 	completed := t.pieceComplete(piece)
 	if completed {
@@ -1711,7 +1715,7 @@ func (t *Torrent) pieceCompletionChanged(piece pieceIndex, reason updateRequestR
 		t.onIncompletePiece(piece)
 	}
 	t.updatePiecePriority(piece, reason)
-	if completed {
+	if completed && wakeSharedRequestOrder {
 		// A completed piece no longer consumes the client-wide unverified-byte
 		// window. Its own pending bit is already gone, so the piece-scoped update
 		// above deliberately skips every peer. Wake idle peers across the shared
@@ -1728,12 +1732,16 @@ func (t *Torrent) updateLowPeersForRequestOrder(reason updateRequestReason) {
 	key := t.clientPieceRequestOrderKey()
 	cl := t.cl
 	if cl.requestOrderWakePending == nil {
-		cl.requestOrderWakePending = make(map[clientPieceRequestOrderKeySumType]struct{})
+		cl.requestOrderWakePending = make(map[clientPieceRequestOrderKeySumType]bool)
 	}
 	if _, pending := cl.requestOrderWakePending[key]; pending {
+		// The running scan covers completions that preceded it. Mark one
+		// follow-up for a completion that arrived after the scan released the
+		// client lock, without starting another competing writer.
+		cl.requestOrderWakePending[key] = true
 		return
 	}
-	cl.requestOrderWakePending[key] = struct{}{}
+	cl.requestOrderWakePending[key] = false
 	go cl.wakeLowPeersForRequestOrder(key, reason)
 }
 
@@ -1741,18 +1749,35 @@ func (cl *Client) wakeLowPeersForRequestOrder(
 	key clientPieceRequestOrderKeySumType,
 	reason updateRequestReason,
 ) {
-	cl.lock()
-	defer cl.unlock()
-	delete(cl.requestOrderWakePending, key)
-	for candidate := range cl.torrents {
-		if candidate.storage == nil || candidate.clientPieceRequestOrderKey() != key {
-			continue
-		}
-		candidate.iterPeers(func(p *Peer) {
-			if p.isLowOnRequests() {
-				p.onNeedUpdateRequests(reason)
+	for {
+		cl.lock()
+		// Completions queued before this scan are covered by it. Keep the key
+		// pending until after the scan releases the writer lock so concurrent
+		// completions can request at most one follow-up.
+		cl.requestOrderWakePending[key] = false
+		for candidate := range cl.torrents {
+			if candidate.storage == nil ||
+				len(candidate.conns) == 0 && len(candidate.webSeeds) == 0 ||
+				candidate.clientPieceRequestOrderKey() != key {
+				continue
 			}
-		})
+			candidate.iterPeers(func(p *Peer) {
+				if p.isLowOnRequests() {
+					p.onNeedUpdateRequests(reason)
+				}
+			})
+		}
+		cl.unlock()
+
+		cl.lock()
+		followUp := cl.requestOrderWakePending[key]
+		if !followUp {
+			delete(cl.requestOrderWakePending, key)
+		}
+		cl.unlock()
+		if !followUp {
+			return
+		}
 	}
 }
 
@@ -1826,18 +1851,21 @@ func (t *Torrent) openNewConns() (initiated int) {
 
 func (t *Torrent) setPieceCompletion(piece pieceIndex, uncached g.Option[bool]) {
 	changed := t.setCachedPieceCompletion(piece, uncached)
-	t.afterSetPieceCompletion(piece, changed)
+	t.afterSetPieceCompletion(piece, changed, true)
 }
 
 func (t *Torrent) setPieceCompletionFromStorage(piece pieceIndex) bool {
 	changed := t.setCachedPieceCompletionFromStorage(piece)
-	t.afterSetPieceCompletion(piece, changed)
+	t.afterSetPieceCompletion(piece, changed, true)
 	return changed
 }
 
 func (t *Torrent) setInitialPieceCompletionFromStorage(piece pieceIndex) {
 	t.setCachedPieceCompletionFromStorage(piece)
-	t.afterSetPieceCompletion(piece, true)
+	// Loading durable completion does not release live unverified-byte budget.
+	// The new torrent has no previously idle shared-order peer to wake, so do
+	// not schedule a client-wide writer scan during retained-corpus restore.
+	t.afterSetPieceCompletion(piece, true, false)
 }
 
 // Sets the cached piece completion directly from storage.
@@ -1889,7 +1917,11 @@ func (t *Torrent) updatePieceCompletion(piece pieceIndex) bool {
 }
 
 // Pulls piece completion state from storage and performs any state updates if it changes.
-func (t *Torrent) afterSetPieceCompletion(piece pieceIndex, changed bool) {
+func (t *Torrent) afterSetPieceCompletion(
+	piece pieceIndex,
+	changed bool,
+	wakeSharedRequestOrder bool,
+) {
 	p := t.piece(piece)
 	cmpl := p.completion()
 	complete := cmpl.Ok && cmpl.Complete
@@ -1899,7 +1931,11 @@ func (t *Torrent) afterSetPieceCompletion(piece pieceIndex, changed bool) {
 		t.logger.Printf("marked piece %v complete but still has dirtiers", piece)
 	}
 	if changed {
-		t.pieceCompletionChanged(piece, "Torrent.updatePieceCompletion")
+		t.pieceCompletionChanged(
+			piece,
+			"Torrent.updatePieceCompletion",
+			wakeSharedRequestOrder,
+		)
 	}
 	if complete {
 		t.openNewConns()
