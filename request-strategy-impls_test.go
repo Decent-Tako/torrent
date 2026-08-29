@@ -212,11 +212,6 @@ func TestRequestOrderWakeCoalescesRestoredCorpusBurst(t *testing.T) {
 		Storage:                  storageClient,
 		DisableInitialPieceCheck: true,
 	})
-	second, _ := cl.AddTorrentOpt(AddTorrentOpts{
-		InfoHash:                 metainfo.Hash{2},
-		Storage:                  storageClient,
-		DisableInitialPieceCheck: true,
-	})
 	info := &metainfo.Info{
 		Name:        "restored-corpus-wake",
 		Length:      32,
@@ -224,7 +219,6 @@ func TestRequestOrderWakeCoalescesRestoredCorpusBurst(t *testing.T) {
 		Pieces:      make([]byte, 32*metainfo.HashSize),
 	}
 	qt.Assert(t, qt.IsNil(first.setInfoUnlocked(info)))
-	qt.Assert(t, qt.IsNil(second.setInfoUnlocked(info)))
 
 	const peerCount = 132
 	counter := &countingWakePeer{
@@ -232,11 +226,19 @@ func TestRequestOrderWakeCoalescesRestoredCorpusBurst(t *testing.T) {
 		done: make(chan struct{}),
 	}
 	peers := make([]*PeerConn, 0, peerCount)
-	for range peerCount {
-		peer := &PeerConn{Peer: Peer{cl: cl, t: second}}
+	peerTorrents := make([]*Torrent, 0, peerCount)
+	for i := range peerCount {
+		candidate, _ := cl.AddTorrentOpt(AddTorrentOpts{
+			InfoHash:                 metainfo.Hash{2, byte(i)},
+			Storage:                  storageClient,
+			DisableInitialPieceCheck: true,
+		})
+		qt.Assert(t, qt.IsNil(candidate.setInfoUnlocked(info)))
+		peer := &PeerConn{Peer: Peer{cl: cl, t: candidate}}
 		peer.legacyPeerImpl = counter
-		second.conns[peer] = struct{}{}
+		candidate.conns[peer] = struct{}{}
 		peers = append(peers, peer)
+		peerTorrents = append(peerTorrents, candidate)
 	}
 
 	cl.lock()
@@ -253,8 +255,8 @@ func TestRequestOrderWakeCoalescesRestoredCorpusBurst(t *testing.T) {
 	}
 
 	cl.lock()
-	for _, peer := range peers {
-		delete(second.conns, peer)
+	for i, peer := range peers {
+		delete(peerTorrents[i].conns, peer)
 	}
 	lowChecks := counter.lowChecks
 	cl.unlock()
