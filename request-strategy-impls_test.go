@@ -2,6 +2,7 @@ package torrent
 
 import (
 	"context"
+	"io"
 	"runtime"
 	"testing"
 
@@ -60,6 +61,92 @@ func (s storagePiece) Completion() storage.Completion {
 }
 
 var _ storage.PieceImpl = storagePiece{}
+
+type mutableCompletionPiece struct {
+	complete *bool
+}
+
+func (p mutableCompletionPiece) ReadAt([]byte, int64) (int, error) {
+	return 0, io.EOF
+}
+
+func (p mutableCompletionPiece) WriteAt(b []byte, _ int64) (int, error) {
+	return len(b), nil
+}
+
+func (p mutableCompletionPiece) MarkComplete() error {
+	*p.complete = true
+	return nil
+}
+
+func (p mutableCompletionPiece) MarkNotComplete() error {
+	*p.complete = false
+	return nil
+}
+
+func (p mutableCompletionPiece) Completion() storage.Completion {
+	return storage.Completion{Ok: true, Complete: *p.complete}
+}
+
+type sharedCompletionStorage struct {
+	complete *bool
+	capacity storage.TorrentCapacity
+}
+
+func (s sharedCompletionStorage) OpenTorrent(
+	context.Context,
+	*metainfo.Info,
+	metainfo.Hash,
+) (storage.TorrentImpl, error) {
+	return storage.TorrentImpl{
+		Piece: func(metainfo.Piece) storage.PieceImpl {
+			return mutableCompletionPiece{complete: s.complete}
+		},
+		Capacity: s.capacity,
+	}, nil
+}
+
+func TestPieceCompletionWakesIdlePeerSharingRequestOrder(t *testing.T) {
+	cl := newTestingClient(t)
+	complete := false
+	capacityFn := func() (int64, bool) { return 1 << 20, true }
+	storageClient := sharedCompletionStorage{
+		complete: &complete,
+		capacity: &capacityFn,
+	}
+	first, _ := cl.AddTorrentOpt(AddTorrentOpts{
+		InfoHash:                 metainfo.Hash{1},
+		Storage:                  storageClient,
+		DisableInitialPieceCheck: true,
+	})
+	second, _ := cl.AddTorrentOpt(AddTorrentOpts{
+		InfoHash:                 metainfo.Hash{2},
+		Storage:                  storageClient,
+		DisableInitialPieceCheck: true,
+	})
+	info := &metainfo.Info{
+		Name:        "shared-request-order",
+		Length:      1,
+		PieceLength: 1,
+		Pieces:      make([]byte, metainfo.HashSize),
+	}
+	qt.Assert(t, qt.IsNil(first.setInfoUnlocked(info)))
+	qt.Assert(t, qt.IsNil(second.setInfoUnlocked(info)))
+	first.DownloadAll()
+	second.DownloadAll()
+
+	peer := PeerConn{Peer: Peer{cl: cl, t: second}}
+	peer.initRequestState()
+	peer.legacyPeerImpl = &peer
+	second.conns[&peer] = struct{}{}
+
+	cl.lock()
+	complete = true
+	qt.Assert(t, qt.IsTrue(first.updatePieceCompletion(0)))
+	qt.Check(t, qt.Equals(peer.needRequestUpdate, updateRequestReason("Torrent.updatePieceCompletion")))
+	delete(second.conns, &peer)
+	cl.unlock()
+}
 
 type storageClient struct {
 	completed int

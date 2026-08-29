@@ -1710,6 +1710,25 @@ func (t *Torrent) pieceCompletionChanged(piece pieceIndex, reason updateRequestR
 		t.onIncompletePiece(piece)
 	}
 	t.updatePiecePriority(piece, reason)
+	// A completed piece no longer consumes the client-wide unverified-byte
+	// window. Its own pending bit is already gone, so the piece-scoped update
+	// above deliberately skips every peer. Wake idle peers across the shared
+	// request order so they can spend the newly available budget.
+	t.updateLowPeersForRequestOrder(reason)
+}
+
+func (t *Torrent) updateLowPeersForRequestOrder(reason updateRequestReason) {
+	key := t.clientPieceRequestOrderKey()
+	for candidate := range t.cl.torrents {
+		if candidate.storage == nil || candidate.clientPieceRequestOrderKey() != key {
+			continue
+		}
+		candidate.iterPeers(func(p *Peer) {
+			if p.isLowOnRequests() {
+				p.onNeedUpdateRequests(reason)
+			}
+		})
+	}
 }
 
 func (t *Torrent) numReceivedConns() (ret int) {
